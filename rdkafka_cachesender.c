@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <math.h>
 #include <syslog.h>
 #include <sys/time.h>
 #include <errno.h>
@@ -11,15 +12,39 @@
 #define DEFAULT_LINES_TO_SEND 1
 #define DEFAULT_LINE_LENGTH 100
 #define DEFAULT_CHUNK_SIZE 16
+#define LOG_EVERY_USEC 1000000
+#define USECS_SLEEP_TIME 100
+#define TOL 0.05
 
 #include "rdkafka.h"  /* for Kafka driver */
 
-static volatile int run = 1;
+static volatile bool run = 1;
 static rd_kafka_t *rk;
 
 static void stop (int sig)
 {
-	run = 0;
+	run = false;
+}
+
+static void cleanup(rd_kafka_t *rk, rd_kafka_topic_t *rkt)
+{
+	/* Poll to handle delivery reports */
+	rd_kafka_poll(rk, 0);
+
+	fprintf(stdout, "Stopped producing. Waiting to deliver every message in the topic...\n");
+
+	/* Wait for messages to be delivered */
+	while (run && rd_kafka_outq_len(rk) > 0)
+		rd_kafka_poll(rk, 100);
+
+	/* Destroy topic */
+	rd_kafka_topic_destroy(rkt);
+
+	/* Destroy the handle */
+	rd_kafka_destroy(rk);
+
+	/* Let background threads clean up and terminate cleanly. */
+	rd_kafka_wait_destroyed(2000);
 }
 
 static void logger (const rd_kafka_t *rk, int level, const char *fac, const char *buf)
@@ -32,14 +57,10 @@ static void logger (const rd_kafka_t *rk, int level, const char *fac, const char
 			level, fac, rd_kafka_name(rk), buf);
 }
 
-static void msg_delivered (rd_kafka_t *rk,
-			void *payload, size_t len,
-			rd_kafka_resp_err_t error_code,
-			void *opaque, void *msg_opaque)
+static void msg_delivered (rd_kafka_t *rk, void *payload, size_t len, rd_kafka_resp_err_t error_code, void *opaque, void *msg_opaque)
 {
 	if (error_code)
 		fprintf(stderr, "%% Message delivery failed: %s\n", rd_kafka_err2str(error_code));
-	fprintf(stderr, "%% Message delivered (%zd bytes)\n", len);
 }
 
 static void sig_usr1 (int sig)
@@ -53,25 +74,34 @@ static void errexit(char* const msg)
 	exit(-1);
 }
 
+/* ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~
+ * main
+ * ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~ */
 int main (int argc, char **argv)
 {
+
+	/* ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~
+	 * setup
+	 * ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~ */
+
 	rd_kafka_topic_t *rkt;
-	char *brokers;
-	char *topic = NULL;
+	int lines_to_send = DEFAULT_LINES_TO_SEND;
 	int partition = RD_KAFKA_PARTITION_UA;
+	int file_size = 0;
+	int *offset_table = (int*) malloc(DEFAULT_CHUNK_SIZE);	//TODO free
+	int offset_table_size = 0;
+	char *memory;
+
 	int opt;
-	rd_kafka_conf_t *conf;
-	rd_kafka_topic_conf_t *topic_conf;
-	char errstr[512];
 	char *filename_string = NULL;
 	char *line_length_string = NULL;
 	char *lines_to_send_string = NULL;
-	int lines_to_send = DEFAULT_LINES_TO_SEND;
+	char *topic = NULL;
+	char *brokers = NULL;
 	int line_length = DEFAULT_LINE_LENGTH;
-
-	/* Kafka configuration + topic */
-	conf = rd_kafka_conf_new();
-	topic_conf = rd_kafka_topic_conf_new();
+	rd_kafka_conf_t *conf = rd_kafka_conf_new();
+	rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
+	char errstr[512];
 
 	while ((opt = getopt(argc, argv, "t:p:b:f:l:n:")) != -1)
 	{
@@ -117,7 +147,7 @@ int main (int argc, char **argv)
 	if(filename_string == NULL)
 		errexit("A file name should be specified");
 
-	char *memory = (char*) malloc(DEFAULT_CHUNK_SIZE);
+	memory = (char*) malloc(DEFAULT_CHUNK_SIZE);	//TODO free
 	if(!memory)
 		errexit("Cannot allocate memory");
 
@@ -125,8 +155,6 @@ int main (int argc, char **argv)
 	FILE *fptr = fopen(filename_string, "rb");
 	if(!fptr)
 		errexit("Error opening file");
-
-	int file_size = 0;
 
 	while(fptr)
 	{
@@ -153,23 +181,19 @@ int main (int argc, char **argv)
 			errexit("Cannot reallocate memory");
 	}
 
-	fprintf(stdout, "File is %d bytes\n", file_size);
-
-	// now parse the memory and divide the content in batch with
-	// line_length maximum length.
-	int *offset_table = (int*) malloc(DEFAULT_CHUNK_SIZE);
+	// now parse the memory and divide the content in batch with line_length maximum length.
 	if(!offset_table)
 		errexit("Cannot allocate memory");
 
 	int curr_line = 0;
 	int line_mem_size = DEFAULT_CHUNK_SIZE;
-	int kk;
+	int lines_sent;
 	int last_space_offset = 0;
 	int last_line_offset = 0;
 
-	for(kk = 0; kk < file_size; kk++)
+	for(lines_sent = 0; lines_sent < file_size; lines_sent++)
 	{
-		if(kk - last_line_offset >= line_length)
+		if(lines_sent - last_line_offset >= line_length)
 		{
 			if(last_space_offset == last_line_offset)
 				errexit("Line too long, try increasing line length");
@@ -187,8 +211,8 @@ int main (int argc, char **argv)
 			last_space_offset ++;
 			last_line_offset = last_space_offset;
 		}
-		if(memory[kk] == ' ')
-			last_space_offset = kk;
+		if(memory[lines_sent] == ' ')
+			last_space_offset = lines_sent;
 	}
 	if(last_line_offset < file_size)
 	{
@@ -196,28 +220,24 @@ int main (int argc, char **argv)
 		curr_line ++;
 	}
 
+	offset_table_size = curr_line;
 	/*
-	// compute average line length
-	int line_offset = 0;
-	double average_line_cum = 0;
-	int average_line_num = 0;
-	for(kk = 0; kk < curr_line; kk++)
-	{
-		int tosend = offset_table[kk] - line_offset;
-		average_line_cum += tosend;
-		average_line_num += 1;
-		line_offset = offset_table[kk];
-	}
-	double average_line_length = average_line_cum / average_line_num;
+		/ / compute average line length
+		int line_offset = 0;
+		double average_line_cum = 0;
+		int average_line_num = 0;
+		for(lines_sent = 0; lines_sent < curr_line; lines_sent++)
+		{
+			int tosend = offset_table[lines_sent] - line_offset;
+			average_line_cum += tosend;
+			average_line_num += 1;
+			line_offset = offset_table[lines_sent];
+		}
+		double average_line_length = average_line_cum / average_line_num;
 	*/
 
-	signal(SIGINT, stop);
-	signal(SIGUSR1, sig_usr1);
-
-	int sendcnt = 0;
-
 	/* Set up a message delivery report callback.
-	* It will be called once for each message, either on successful delivery to broker, or upon failure to deliver to broker. */
+	 * It will be called once for each message, either on successful delivery to broker, or upon failure to deliver to broker. */
 	rd_kafka_conf_set_dr_cb(conf, msg_delivered);
 
 	/* Create Kafka handle */
@@ -238,13 +258,30 @@ int main (int argc, char **argv)
 	/* Create topic */
 	rkt = rd_kafka_topic_new(rk, topic, topic_conf);
 
-	int offset_table_size = curr_line;
+	printf(	"welcome to Kafka Cachesender! describing configuration\n"
+	"\t- producing messages of %d lines (%d B each, at most)\n"
+	"\t- sleeping for %d usecs between each message (handicap factor)\n"
+	"\t- sourcing from file %s (%d B)\n",
+			lines_to_send, line_length, (int)USECS_SLEEP_TIME, filename_string, file_size);
+
+	signal(SIGINT, stop);
+	signal(SIGUSR1, sig_usr1);
+
+	/* ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~
+	 * cache_send
+	 * ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~  ~ */
+
+	struct timeval timer_start, timer_end;
+	gettimeofday(&timer_start, NULL);
+	double throughput_tol = TOL;
+	int total_bytes_sent = 0;
 
 	while (run)
 	{
 		int line_offset = 0;
-		int kk;
-		for(kk = 0; kk < offset_table_size; kk += lines_to_send)
+		int lines_sent;
+
+		for(lines_sent = 0; lines_sent < offset_table_size; lines_sent += lines_to_send)
 		{
 			if(run==false)
 				break;
@@ -252,10 +289,10 @@ int main (int argc, char **argv)
 			char *memory_to_send = memory + line_offset;
 			int tosend, index;
 
-			if(kk > offset_table_size - lines_to_send)
+			if(lines_sent > offset_table_size - lines_to_send)
 				index = offset_table_size;
 			else
-				index = kk + lines_to_send;
+				index = lines_sent + lines_to_send;
 			tosend = offset_table[index - 1] - line_offset;
 
 			/*
@@ -278,57 +315,53 @@ int main (int argc, char **argv)
 
 			/* Send/Produce message. */
 			if (rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY,
-								/* Payload and length */
-								memory_to_send, tosend,
-								/* Optional key and its length */
-								NULL, 0,
-								/* Message opaque, provided in delivery report callback as msg_opaque. */
-								NULL) == -1)
+				/* Payload and length */
+				memory_to_send, tosend,
+				/* Optional key and its length */
+				NULL, 0,
+				/* Message opaque, provided in delivery report callback as msg_opaque. */
+				NULL) == -1)
 			{
-				fprintf(stderr, "%% Failed to produce to topic %s partition %i: %s\n", rd_kafka_topic_name(rkt), partition, rd_kafka_err2str(rd_kafka_errno2err(errno)));
+				fprintf(stderr, "%% Failed to produce message: %s\n", rd_kafka_err2str(rd_kafka_errno2err(errno)));
 				/* Poll to handle delivery reports */
 				rd_kafka_poll(rk, 0);
 				continue;
 			}
 
-			sleep(1);
+			//fprintf(stderr, "%% Sent %d bytes to topic %s partition %i\n", tosend, rd_kafka_topic_name(rkt), partition);
 
-			fprintf(stderr, "%% Sent %d bytes to topic %s partition %i\n", tosend, rd_kafka_topic_name(rkt), partition);
-			sendcnt++;
+			usleep(USECS_SLEEP_TIME);
+			/*
+			 *	elapsed_usecs ++;
+			 *	if(elapsed_usecs % LOG_EVERY_USEC < usecs_sleep_time)
+			 *		printf("Sending rate: %d bytes/sec\n", tosend);
+			 *	else
+			 *		printf("%ld mod %ld >= %d\n", elapsed_usecs, (long)LOG_EVERY_USEC, usecs_sleep_time);
+			 */
+
 			/* Poll to handle delivery reports */
 			rd_kafka_poll(rk, 0);
 
 			/*
-			if(bw > 0)
-				if(delay > 0)
-					usleep(delay);
-			*/
-			line_offset = offset_table[kk + lines_to_send -1];
+			 *	if ((bw > 0) && (delay > 0))
+			 *		usleep(delay);
+			 */
+			line_offset = offset_table[lines_sent + lines_to_send -1];
 		}
-		/*
-		size_t len = strlen(buf);
-		if (buf[len-1] == '\n')
-			buf[--len] = '\0';
-		*/
+
+		gettimeofday(&timer_end, NULL);
+		total_bytes_sent += file_size;
+		long usecs_spent = (timer_end.tv_sec*1e6 + timer_end.tv_usec) - (timer_start.tv_sec*1e6 + timer_start.tv_usec);
+		double secs_spent = usecs_spent/(double)LOG_EVERY_USEC;
+
+		if(fabs(secs_spent - 1) < throughput_tol)
+		{
+			printf("Sent %d bytes in %.6f secs (%d Kbps)\n", total_bytes_sent, secs_spent, (int)(8*total_bytes_sent/(1000*secs_spent)));
+			total_bytes_sent = 0;
+			gettimeofday(&timer_start, NULL);
+		}
 	}
 
-	/* Poll to handle delivery reports */
-	rd_kafka_poll(rk, 0);
-
-	fprintf(stdout, "Stopped receiving. Waiting to deliver every message in the topic...\n");
-
-	/* Wait for messages to be delivered */
-	while (run && rd_kafka_outq_len(rk) > 0)
-		rd_kafka_poll(rk, 100);
-
-	/* Destroy topic */
-	rd_kafka_topic_destroy(rkt);
-
-	/* Destroy the handle */
-	rd_kafka_destroy(rk);
-
-	/* Let background threads clean up and terminate cleanly. */
-	rd_kafka_wait_destroyed(2000);
-
+	cleanup(rk, rkt);
 	return 0;
 }
