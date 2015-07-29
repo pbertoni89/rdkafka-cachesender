@@ -21,6 +21,13 @@
 static volatile bool run = 1;
 static rd_kafka_t *rk;
 
+static void print_usage_err ()
+{
+	fprintf(stderr, "Invalid parameter. Usage:\n\trdkafka_cachesender "
+					"-f <filename> -b <brokers> -t <topic> [-p <partition>] "
+					"[-l <line_length>] [-n <lines_to_send>] [-h <sleep_time>]");
+}
+
 static void stop (int sig)
 {
 	run = false;
@@ -126,7 +133,8 @@ int main (int argc, char **argv)
 				lines_to_send_string = optarg;
 				break;
 			default:
-				errexit("Invalid parameter");
+				print_usage_err();
+				errexit("");
 		}
 	}
 
@@ -228,8 +236,8 @@ int main (int argc, char **argv)
 		int average_line_num = 0;
 		for(lines_sent = 0; lines_sent < curr_line; lines_sent++)
 		{
-			int tosend = offset_table[lines_sent] - line_offset;
-			average_line_cum += tosend;
+			int bytes_to_send = offset_table[lines_sent] - line_offset;
+			average_line_cum += bytes_to_send;
 			average_line_num += 1;
 			line_offset = offset_table[lines_sent];
 		}
@@ -240,22 +248,22 @@ int main (int argc, char **argv)
 	 * It will be called once for each message, either on successful delivery to broker, or upon failure to deliver to broker. */
 	rd_kafka_conf_set_dr_cb(conf, msg_delivered);
 
-	/* Create Kafka handle */
+	// Create Kafka handle
 	if (!(rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr))))
 	{
 		fprintf(stderr, "%% Failed to create new producer: %s\n", errstr);
 		exit(1);
 	}
 
-	/* Set logger */
+	// Set logger
 	rd_kafka_set_logger(rk, logger);
 	rd_kafka_set_log_level(rk, LOG_DEBUG);
 
-	/* Add brokers */
+	// Add brokers
 	if (rd_kafka_brokers_add(rk, brokers) == 0)
 		errexit("%% No valid brokers specified");
 
-	/* Create topic */
+	// Create topic
 	rkt = rd_kafka_topic_new(rk, topic, topic_conf);
 
 	printf(	"welcome to Kafka Cachesender! describing configuration\n"
@@ -287,78 +295,47 @@ int main (int argc, char **argv)
 				break;
 
 			char *memory_to_send = memory + line_offset;
-			int tosend, index;
+			int bytes_to_send, index;
 
 			if(lines_sent > offset_table_size - lines_to_send)
 				index = offset_table_size;
 			else
 				index = lines_sent + lines_to_send;
-			tosend = offset_table[index - 1] - line_offset;
+			bytes_to_send = offset_table[index - 1] - line_offset;
 
-			/*
-			gettimeofday(&t2, NULL);
-			if(bw > 0)
+			// Calculate throughput
+			gettimeofday(&timer_end, NULL);
+			usleep(USECS_SLEEP_TIME);
+			total_bytes_sent += bytes_to_send;
+			long usecs_spent = (timer_end.tv_sec*1e6 + timer_end.tv_usec) - (timer_start.tv_sec*1e6 + timer_start.tv_usec);
+			double secs_spent = usecs_spent/(double)LOG_EVERY_USEC;
+
+			if(fabs(secs_spent - 1) < throughput_tol)
 			{
-				int adjust = delay_set_by_user + compute_delta(&t1, &t2);
-				t1 = t2;
-				if(adjust > 0 || delay > 0)
-					delay += adjust;
+				printf("Sent %d bytes in %.6f secs (%d Kbps)\n", total_bytes_sent, secs_spent, (int)(8*total_bytes_sent/(1000*secs_spent)));
+				total_bytes_sent = 0;
+				gettimeofday(&timer_start, NULL);
 			}
 
-			if(compute_delta(&t2, &lastlog) > LOG_EVERY_USEC)
-			{
-				fprintf(stdout, "throughput (b/s) = %ld\n", 8 * totbyte * 1000000 / compute_delta(&t2, &tstart));
-				fflush(stdout);
-				lastlog = t2;
-			}
-			*/
-
-			/* Send/Produce message. */
+			// Send/Produce message
 			if (rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY,
-				/* Payload and length */
-				memory_to_send, tosend,
-				/* Optional key and its length */
+				// Payload and length
+				memory_to_send, bytes_to_send,
+				// Optional key and its length
 				NULL, 0,
-				/* Message opaque, provided in delivery report callback as msg_opaque. */
+				// Message opaque, provided in delivery report callback as msg_opaque
 				NULL) == -1)
 			{
 				fprintf(stderr, "%% Failed to produce message: %s\n", rd_kafka_err2str(rd_kafka_errno2err(errno)));
-				/* Poll to handle delivery reports */
+				// Poll to handle delivery reports
 				rd_kafka_poll(rk, 0);
 				continue;
 			}
 
-			//fprintf(stderr, "%% Sent %d bytes to topic %s partition %i\n", tosend, rd_kafka_topic_name(rkt), partition);
-
-			usleep(USECS_SLEEP_TIME);
-			/*
-			 *	elapsed_usecs ++;
-			 *	if(elapsed_usecs % LOG_EVERY_USEC < usecs_sleep_time)
-			 *		printf("Sending rate: %d bytes/sec\n", tosend);
-			 *	else
-			 *		printf("%ld mod %ld >= %d\n", elapsed_usecs, (long)LOG_EVERY_USEC, usecs_sleep_time);
-			 */
-
-			/* Poll to handle delivery reports */
+			// Poll to handle delivery reports/
 			rd_kafka_poll(rk, 0);
 
-			/*
-			 *	if ((bw > 0) && (delay > 0))
-			 *		usleep(delay);
-			 */
 			line_offset = offset_table[lines_sent + lines_to_send -1];
-		}
-
-		gettimeofday(&timer_end, NULL);
-		total_bytes_sent += file_size;
-		long usecs_spent = (timer_end.tv_sec*1e6 + timer_end.tv_usec) - (timer_start.tv_sec*1e6 + timer_start.tv_usec);
-		double secs_spent = usecs_spent/(double)LOG_EVERY_USEC;
-
-		if(fabs(secs_spent - 1) < throughput_tol)
-		{
-			printf("Sent %d bytes in %.6f secs (%d Kbps)\n", total_bytes_sent, secs_spent, (int)(8*total_bytes_sent/(1000*secs_spent)));
-			total_bytes_sent = 0;
-			gettimeofday(&timer_start, NULL);
 		}
 	}
 
