@@ -1,10 +1,7 @@
-SCRIPTS
+KAFKA SETUP
 -------------------
-Within kafka: run
 
-    bin/kafka-topics.sh --create --topic wc --partition 1 --replication-factor 1 --zookeeper localhost:2181
-
-Edit `./config/server.properties`, adding/modifying the following lines
+First of all, move to `kafka_version` directory. Mine is `kafka_2.11-0.8.2.1`
 
     delete.topic.enable=true
     advertised.host.name=<broker_ip>

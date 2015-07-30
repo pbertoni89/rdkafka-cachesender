@@ -25,7 +25,7 @@ static void print_usage_err ()
 {
 	fprintf(stderr, "Invalid parameter. Usage:\n\trdkafka_cachesender "
 					"-f <filename> -b <brokers> -t <topic> [-p <partition>] "
-					"[-l <line_length>] [-n <lines_to_send>] [-h <sleep_time>]");
+					"[-l <line_length>] [-n <lines_to_send>] [-s <sleep_time>]");
 }
 
 static void stop (int sig)
@@ -93,6 +93,7 @@ int main (int argc, char **argv)
 
 	rd_kafka_topic_t *rkt;
 	int lines_to_send = DEFAULT_LINES_TO_SEND;
+	int sleep_time = USECS_SLEEP_TIME;
 	int partition = RD_KAFKA_PARTITION_UA;
 	int file_size = 0;
 	int *offset_table = (int*) malloc(DEFAULT_CHUNK_SIZE);	//TODO free
@@ -103,6 +104,7 @@ int main (int argc, char **argv)
 	char *filename_string = NULL;
 	char *line_length_string = NULL;
 	char *lines_to_send_string = NULL;
+	char *sleep_time_string = NULL;
 	char *topic = NULL;
 	char *brokers = NULL;
 	int line_length = DEFAULT_LINE_LENGTH;
@@ -110,7 +112,7 @@ int main (int argc, char **argv)
 	rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
 	char errstr[512];
 
-	while ((opt = getopt(argc, argv, "t:p:b:f:l:n:")) != -1)
+	while ((opt = getopt(argc, argv, "t:p:b:f:l:n:s:")) != -1)
 	{
 		switch (opt)
 		{
@@ -132,6 +134,9 @@ int main (int argc, char **argv)
 			case 'n':
 				lines_to_send_string = optarg;
 				break;
+			case 's':
+				sleep_time_string = optarg;
+				break;
 			default:
 				print_usage_err();
 				errexit("");
@@ -150,6 +155,13 @@ int main (int argc, char **argv)
 		lines_to_send = atoi(lines_to_send_string);
 		if(lines_to_send <= 0)
 			errexit("Invalid lines to send number");
+	}
+
+	if(sleep_time_string != NULL)
+	{
+		sleep_time = atoi(sleep_time_string);
+		if(sleep_time <= 0)
+			errexit("Invalid sleep time number");
 	}
 
 	if(filename_string == NULL)
@@ -268,9 +280,9 @@ int main (int argc, char **argv)
 
 	printf(	"welcome to Kafka Cachesender! describing configuration\n"
 	"\t- producing messages of %d lines (%d B each, at most)\n"
-	"\t- sleeping for %d usecs between each message (handicap factor)\n"
+	"\t- sleeping for %d usecs between each message (!!!)\n"
 	"\t- sourcing from file %s (%d B)\n",
-			lines_to_send, line_length, (int)USECS_SLEEP_TIME, filename_string, file_size);
+			lines_to_send, line_length, sleep_time, filename_string, file_size);
 
 	signal(SIGINT, stop);
 	signal(SIGUSR1, sig_usr1);
@@ -305,14 +317,19 @@ int main (int argc, char **argv)
 
 			// Calculate throughput
 			gettimeofday(&timer_end, NULL);
-			usleep(USECS_SLEEP_TIME);
+			usleep(sleep_time);
 			total_bytes_sent += bytes_to_send;
 			long usecs_spent = (timer_end.tv_sec*1e6 + timer_end.tv_usec) - (timer_start.tv_sec*1e6 + timer_start.tv_usec);
 			double secs_spent = usecs_spent/(double)LOG_EVERY_USEC;
 
 			if(fabs(secs_spent - 1) < throughput_tol)
 			{
-				printf("Sent %d bytes in %.6f secs (%d Kbps)\n", total_bytes_sent, secs_spent, (int)(8*total_bytes_sent/(1000*secs_spent)));
+				int kbps_rate = (8*total_bytes_sent)/(1000*secs_spent);
+				// this is because of the granularity
+				if (kbps_rate <= 1)
+					printf("Sent %d bytes in %.6f secs (<= 1 Kbps)\n", total_bytes_sent, secs_spent);
+				else
+					printf("Sent %d bytes in %.6f secs (%d Kbps)\n", total_bytes_sent, secs_spent, kbps_rate);
 				total_bytes_sent = 0;
 				gettimeofday(&timer_start, NULL);
 			}
