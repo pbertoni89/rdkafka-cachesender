@@ -8,6 +8,7 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <assert.h>
+#include <stdbool.h>
 
 #define DEFAULT_LINES_TO_SEND 1
 #define DEFAULT_LINE_LENGTH 100

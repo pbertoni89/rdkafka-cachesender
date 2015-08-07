@@ -1,2 +1,3 @@
-rdkafka_cachesender
+rdkafka-cachesender
 .project/
+Debug/
