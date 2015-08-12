@@ -282,8 +282,9 @@ int main (int argc, char **argv)
 	printf(	"welcome to Kafka Cachesender! describing configuration\n"
 	"\t- producing messages of %d lines (%d B each, at most)\n"
 	"\t- sleeping for %d usecs between each message (!!!)\n"
-	"\t- sourcing from file %s (%d B)\n",
-			lines_to_send, line_length, sleep_time, filename_string, file_size);
+	"\t- sourcing from file %s (%d B)\n"
+	"\t- sending to topic %s partition %d of broker %s\n",
+		lines_to_send, line_length, sleep_time, filename_string, file_size, topic, partition, brokers);
 
 	signal(SIGINT, stop);
 	signal(SIGUSR1, sig_usr1);
@@ -295,7 +296,8 @@ int main (int argc, char **argv)
 	struct timeval timer_start, timer_end;
 	gettimeofday(&timer_start, NULL);
 	double throughput_tol = TOL;
-	int total_bytes_sent = 0;
+	long total_bytes_sent = 0;
+	long total_msgs_sent = 0;
 
 	while (run)
 	{
@@ -316,25 +318,6 @@ int main (int argc, char **argv)
 				index = lines_sent + lines_to_send;
 			bytes_to_send = offset_table[index - 1] - line_offset;
 
-			// Calculate throughput
-			gettimeofday(&timer_end, NULL);
-			usleep(sleep_time);
-			total_bytes_sent += bytes_to_send;
-			long usecs_spent = (timer_end.tv_sec*1e6 + timer_end.tv_usec) - (timer_start.tv_sec*1e6 + timer_start.tv_usec);
-			double secs_spent = usecs_spent/(double)LOG_EVERY_USEC;
-
-			if(fabs(secs_spent - 1) < throughput_tol)
-			{
-				int kbps_rate = (8*total_bytes_sent)/(1000*secs_spent);
-				// this is because of the granularity
-				if (kbps_rate <= 1)
-					printf("Sent %d bytes in %.6f secs (<= 1 Kbps)\n", total_bytes_sent, secs_spent);
-				else
-					printf("Sent %d bytes in %.6f secs (%d Kbps)\n", total_bytes_sent, secs_spent, kbps_rate);
-				total_bytes_sent = 0;
-				gettimeofday(&timer_start, NULL);
-			}
-
 			// Send/Produce message
 			if (rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY,
 				// Payload and length
@@ -345,9 +328,33 @@ int main (int argc, char **argv)
 				NULL) == -1)
 			{
 				fprintf(stderr, "%% Failed to produce message: %s\n", rd_kafka_err2str(rd_kafka_errno2err(errno)));
+				total_bytes_sent -= bytes_to_send;
 				// Poll to handle delivery reports
 				rd_kafka_poll(rk, 0);
 				continue;
+			}
+
+			total_bytes_sent += bytes_to_send;
+			total_msgs_sent ++;
+
+			// Calculate throughput
+			gettimeofday(&timer_end, NULL);
+			usleep(sleep_time);
+			long usecs_spent = (timer_end.tv_sec*1e6 + timer_end.tv_usec) - (timer_start.tv_sec*1e6 + timer_start.tv_usec);
+			double secs_spent = usecs_spent/(double)LOG_EVERY_USEC;
+
+			if(fabs(secs_spent - 1) < throughput_tol)
+			{
+				int kbps_rate = (8*total_bytes_sent)/(1000*secs_spent);
+				// this is because of the granularity
+				if (kbps_rate == 0)
+					printf("No bytes sent in %.6f secs\n", secs_spent);
+				else if (kbps_rate <= 1)
+					printf("Sent %ld bytes in %.6f secs (<= 1 Kbps), %ld msgs\n", total_bytes_sent, secs_spent, total_msgs_sent);
+				else
+					printf("Sent %ld bytes in %.6f secs (%d Kbps), %ld msgs\n", total_bytes_sent, secs_spent, kbps_rate, total_msgs_sent);
+				total_bytes_sent = 0;
+				gettimeofday(&timer_start, NULL);
 			}
 
 			// Poll to handle delivery reports/
