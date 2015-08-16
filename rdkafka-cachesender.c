@@ -161,7 +161,7 @@ int main (int argc, char **argv)
 	if(sleep_time_string != NULL)
 	{
 		sleep_time = atoi(sleep_time_string);
-		if(sleep_time <= 0)
+		if(sleep_time < 0)
 			errexit("Invalid sleep time number");
 	}
 
@@ -242,20 +242,6 @@ int main (int argc, char **argv)
 	}
 
 	offset_table_size = curr_line;
-	/*
-		/ / compute average line length
-		int line_offset = 0;
-		double average_line_cum = 0;
-		int average_line_num = 0;
-		for(lines_sent = 0; lines_sent < curr_line; lines_sent++)
-		{
-			int bytes_to_send = offset_table[lines_sent] - line_offset;
-			average_line_cum += bytes_to_send;
-			average_line_num += 1;
-			line_offset = offset_table[lines_sent];
-		}
-		double average_line_length = average_line_cum / average_line_num;
-	*/
 
 	/* Set up a message delivery report callback.
 	 * It will be called once for each message, either on successful delivery to broker, or upon failure to deliver to broker. */
@@ -339,7 +325,10 @@ int main (int argc, char **argv)
 
 			// Calculate throughput
 			gettimeofday(&timer_end, NULL);
-			usleep(sleep_time);
+
+			if(sleep_time > 0)
+				usleep(sleep_time);
+
 			long usecs_spent = (timer_end.tv_sec*1e6 + timer_end.tv_usec) - (timer_start.tv_sec*1e6 + timer_start.tv_usec);
 			double secs_spent = usecs_spent/(double)LOG_EVERY_USEC;
 
