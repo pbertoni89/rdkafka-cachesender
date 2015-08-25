@@ -24,60 +24,16 @@ inline long compute_delta(struct timeval* t2, struct timeval* t1) {
            (t2->tv_usec - t1->tv_usec);
 }
 
-static void msg_consume (rd_kafka_message_t *rkmessage,
-			 void *opaque) {
-	if (rkmessage->err) {
-		if (rkmessage->err == RD_KAFKA_RESP_ERR__PARTITION_EOF) {
-			fprintf(stderr,
-				"%% Consumer reached end of %s [%"PRId32"] "
-			       "message queue at offset %"PRId64"\n",
-			       rd_kafka_topic_name(rkmessage->rkt),
-			       rkmessage->partition, rkmessage->offset);
-
-			return;
-		}
-
-		fprintf(stderr, "%% Consume error for topic \"%s\" [%"PRId32"] "
-		       "offset %"PRId64": %s\n",
-		       rd_kafka_topic_name(rkmessage->rkt),
-		       rkmessage->partition,
-		       rkmessage->offset,
-		       rd_kafka_message_errstr(rkmessage));
-		return;
-	}
-
-	totreceived += rkmessage->len;
-        struct timeval t2;
-	gettimeofday(&t2, NULL);
-#define LOG_EVERY_USEC 1000000
-	if(compute_delta(&t2, &tlast) > LOG_EVERY_USEC) {
-		fprintf(stdout, "received = %ld, throughput (b/s) = %ld\n",
-			totreceived,
-			8 * totreceived * 1000000L / compute_delta(&t2, &tstart));
-		fflush(stdout);
-		tlast = t2;
-	}
-
-/*
-	fprintf(stdout, "%% Message (offset %"PRId64", %zd bytes):\n",
-		rkmessage->offset, rkmessage->len);
-
-	printf("Key: %.*s\n",
-		(int)rkmessage->key_len, (char *)rkmessage->key);
-	printf("%.*s\n",
-		(int)rkmessage->len, (char *)rkmessage->payload);
-*/
-}
-
 static void sig_usr1 (int sig) {
 	rd_kafka_dump(stdout, rk);
 }
 
 int main (int argc, char **argv) {
 	rd_kafka_topic_t *rkt;
-	char *brokers = "localhost:9092";
-	char *topic = NULL;
-	int partition = RD_KAFKA_PARTITION_UA;
+	char *brokers = "10.20.10.141:9092";
+	char *topic = "wc";
+	int partition = 0;
+	int m_words_sent = 0;
 	int opt;
 	rd_kafka_conf_t *conf;
 	rd_kafka_topic_conf_t *topic_conf;
@@ -146,8 +102,79 @@ int main (int argc, char **argv) {
 		if (!rkmessage) /* timeout */
 			continue;
 
-		msg_consume(rkmessage, NULL);
+// -------------------------------------------------.
 
+		if (rkmessage->err)
+		{
+			printf("AAA");
+			exit(0);
+		}
+
+		totreceived += rkmessage->len;
+		struct timeval t2;
+		gettimeofday(&t2, NULL);
+		#define LOG_EVERY_USEC 1000000
+		if(compute_delta(&t2, &tlast) > LOG_EVERY_USEC) {
+			fprintf(stdout, "received = %ld B, %ld wps, throughput (b/s) = %ld\n",
+					totreceived,
+					m_words_sent * 1000000L / compute_delta(&t2, &tstart),
+					8 * totreceived * 1000000L / compute_delta(&t2, &tstart));
+			fflush(stdout);
+			tlast = t2;
+		}
+
+		int payload_len = (int) rkmessage->len;
+		//std::cout << WORDSKAFKA_NAME << "Message payload " << payload_len << "B, offset " << m_start_offset << std::endl;
+		char * payload = (char*) rkmessage->payload;
+
+		// we have retc + offset byte in the storage, process it
+		int whitespace;
+		char * p_word = NULL;
+
+		for(whitespace = 0; whitespace < payload_len; whitespace ++)
+		{
+			if(isspace(payload[whitespace]))
+			{
+				payload[whitespace] = 0;
+				if(p_word != NULL)
+				{
+					//std::string w(p_word);
+
+					//BOTTLENECK std::remove_copy_if(w.begin(), w.end(), std::back_inserter(w), std::ptr_fun<int, int>(&std::ispunct));
+					//auto remove_punct = [](char c) { return std::ispunct(static_cast<unsigned char>(c)); };
+					//w.erase(std::remove_if(w.begin(), w.end(), remove_punct), w.end());
+
+/*
+					std::shared_ptr<std::map<std::string, uint32_t>> map = m_words_map->map();
+					std::map<std::string, uint32_t>::iterator it = map->find(w);
+
+					if(it != map->end())
+						it->second ++;
+					else
+						map->insert(std::pair<std::string, uint32_t> (w, 1));
+
+					if((m_words_sent % m_send_limit) == 0)
+					{
+						std::cout << "Sending map to aggregator\n";
+						auto map_copy = m_words_map;
+						if(map->find("xxxxx11111") == map->end())
+						{
+							map->insert(std::pair<std::string, uint32_t>("xxxxx11111", atoi(m_node_id.c_str())));
+						}
+						send_out_through(std::move(map_copy), m_gate_id);
+						//m_map_sent ++;
+					}
+*/
+					m_words_sent ++;
+				}
+				p_word = NULL;
+			}
+			else
+				if(p_word == NULL)
+					p_word = payload + whitespace;
+
+// -------------------------------------------------.
+		}
 		/* Return message to rdkafka */
 		rd_kafka_message_destroy(rkmessage);
 	}
