@@ -20,8 +20,8 @@ struct timeval tstart, tlast;
 long totreceived = 0;
 
 inline long compute_delta(struct timeval* t2, struct timeval* t1) {
-    return ((long)(t2->tv_sec - t1->tv_sec)) * 1000000 +
-           (t2->tv_usec - t1->tv_usec);
+	return ((long)(t2->tv_sec - t1->tv_sec)) * 1000000 +
+			(t2->tv_usec - t1->tv_usec);
 }
 
 static void sig_usr1 (int sig) {
@@ -66,10 +66,10 @@ int main (int argc, char **argv) {
 
 	/* Create Kafka handle */
 	if (!(rk = rd_kafka_new(RD_KAFKA_CONSUMER, conf,
-				errstr, sizeof(errstr)))) {
+			errstr, sizeof(errstr)))) {
 		fprintf(stderr,
-			"%% Failed to create new consumer: %s\n",
-			errstr);
+				"%% Failed to create new consumer: %s\n",
+				errstr);
 		exit(1);
 	}
 
@@ -85,14 +85,15 @@ int main (int argc, char **argv) {
 	/* Start consuming */
 	if (rd_kafka_consume_start(rkt, partition, start_offset) == -1){
 		fprintf(stderr, "%% Failed to start consuming: %s\n",
-			rd_kafka_err2str(rd_kafka_errno2err(errno)));
+				rd_kafka_err2str(rd_kafka_errno2err(errno)));
 		exit(1);
 	}
 
-        gettimeofday(&tstart, NULL);
+	gettimeofday(&tstart, NULL);
 	tlast = tstart;
 
-	while (run) {
+	while (run)
+	{
 		rd_kafka_message_t *rkmessage;
 
 		/* Consume single message.
@@ -102,7 +103,7 @@ int main (int argc, char **argv) {
 		if (!rkmessage) /* timeout */
 			continue;
 
-// -------------------------------------------------.
+		// -------------------------------------------------.
 
 		if (rkmessage->err)
 		{
@@ -113,8 +114,9 @@ int main (int argc, char **argv) {
 		totreceived += rkmessage->len;
 		struct timeval t2;
 		gettimeofday(&t2, NULL);
-		#define LOG_EVERY_USEC 1000000
-		if(compute_delta(&t2, &tlast) > LOG_EVERY_USEC) {
+#define LOG_EVERY_USEC 1000000
+		if(compute_delta(&t2, &tlast) > LOG_EVERY_USEC)
+		{
 			fprintf(stdout, "received = %ld B, %ld wps, throughput (b/s) = %ld\n",
 					totreceived,
 					m_words_sent * 1000000L / compute_delta(&t2, &tstart),
@@ -124,9 +126,11 @@ int main (int argc, char **argv) {
 		}
 
 		int payload_len = (int) rkmessage->len;
-		//std::cout << WORDSKAFKA_NAME << "Message payload " << payload_len << "B, offset " << m_start_offset << std::endl;
-		char * payload = (char*) rkmessage->payload;
 
+		char * payload = (char*) rkmessage->payload;
+		printf("Message payload %d B, offset %d\n", payload_len, start_offset);
+		/*
+// <token>
 		// we have retc + offset byte in the storage, process it
 		int whitespace;
 		char * p_word = NULL;
@@ -144,7 +148,7 @@ int main (int argc, char **argv) {
 					//auto remove_punct = [](char c) { return std::ispunct(static_cast<unsigned char>(c)); };
 					//w.erase(std::remove_if(w.begin(), w.end(), remove_punct), w.end());
 
-/*
+// <map>
 					std::shared_ptr<std::map<std::string, uint32_t>> map = m_words_map->map();
 					std::map<std::string, uint32_t>::iterator it = map->find(w);
 
@@ -164,7 +168,7 @@ int main (int argc, char **argv) {
 						send_out_through(std::move(map_copy), m_gate_id);
 						//m_map_sent ++;
 					}
-*/
+// </map>
 					m_words_sent ++;
 				}
 				p_word = NULL;
@@ -172,10 +176,9 @@ int main (int argc, char **argv) {
 			else
 				if(p_word == NULL)
 					p_word = payload + whitespace;
-
-// -------------------------------------------------.
 		}
-		/* Return message to rdkafka */
+// </token>
+		*/
 		rd_kafka_message_destroy(rkmessage);
 	}
 

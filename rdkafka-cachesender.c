@@ -266,11 +266,12 @@ int main (int argc, char **argv)
 	rkt = rd_kafka_topic_new(rk, topic, topic_conf);
 
 	printf(	"welcome to Kafka Cachesender! describing configuration\n"
-	"\t- producing messages of %d lines (%d B each, at most)\n"
+	"\t- producing messages of %d lines * %d B each = %d B\n"
 	"\t- sleeping for %d usecs between each message (!!!)\n"
 	"\t- sourcing from file %s (%d B)\n"
 	"\t- sending to topic %s partition %d of broker %s\n",
-		lines_to_send, line_length, sleep_time, filename_string, file_size, topic, partition, brokers);
+		lines_to_send, line_length, lines_to_send*line_length, sleep_time,
+		filename_string, file_size, topic, partition, brokers);
 
 	signal(SIGINT, stop);
 	signal(SIGUSR1, sig_usr1);
