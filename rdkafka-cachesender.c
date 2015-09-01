@@ -13,8 +13,9 @@
 #define DEFAULT_LINES_TO_SEND 1
 #define DEFAULT_LINE_LENGTH 100
 #define DEFAULT_CHUNK_SIZE 16
-#define LOG_EVERY_USEC 1000000
+#define ONE_MILLION 1000000
 #define USECS_SLEEP_TIME 100
+#define MSGS_TO_SEND -1
 #define TOL 0.05
 
 #include "rdkafka.h"  /* for Kafka driver */
@@ -26,7 +27,7 @@ static void print_usage_err ()
 {
 	fprintf(stderr, "Invalid parameter. Usage:\n\trdkafka_cachesender "
 					"-f <filename> -b <brokers> -t <topic> [-p <partition>] "
-					"[-l <line_length>] [-n <lines_to_send>] [-s <sleep_time>]");
+					"[-l <line_length>] [-n <lines_to_send>] [-s <sleep_time>] [-m <messages_to_send>]");
 }
 
 static void stop (int sig)
@@ -34,16 +35,18 @@ static void stop (int sig)
 	run = false;
 }
 
-static void cleanup(rd_kafka_t *rk, rd_kafka_topic_t *rkt)
+static void cleanup(rd_kafka_t *rk, rd_kafka_topic_t *rkt, unsigned long total_msgs_sent)
 {
 	/* Poll to handle delivery reports */
 	rd_kafka_poll(rk, 0);
 
-	fprintf(stdout, "Stopped producing. Waiting to deliver every message in the topic...\n");
+	fprintf(stdout, "Stopped after producing %lu msgs. Delivering %d unsent msgs...", total_msgs_sent, rd_kafka_outq_len(rk));
 
 	/* Wait for messages to be delivered */
 	while (run && rd_kafka_outq_len(rk) > 0)
 		rd_kafka_poll(rk, 100);
+
+	fprintf(stdout, " done.\n");
 
 	/* Destroy topic */
 	rd_kafka_topic_destroy(rkt);
@@ -95,6 +98,8 @@ int main (int argc, char **argv)
 	rd_kafka_topic_t *rkt;
 	int lines_to_send = DEFAULT_LINES_TO_SEND;
 	int sleep_time = USECS_SLEEP_TIME;
+	unsigned long msgs_to_send = MSGS_TO_SEND;
+	bool is_msgs_limited = false;
 	int partition = RD_KAFKA_PARTITION_UA;
 	int file_size = 0;
 	int *offset_table = (int*) malloc(DEFAULT_CHUNK_SIZE);	//TODO free
@@ -106,6 +111,7 @@ int main (int argc, char **argv)
 	char *line_length_string = NULL;
 	char *lines_to_send_string = NULL;
 	char *sleep_time_string = NULL;
+	char *msgs_to_send_string = NULL;
 	char *topic = NULL;
 	char *brokers = NULL;
 	int line_length = DEFAULT_LINE_LENGTH;
@@ -113,7 +119,7 @@ int main (int argc, char **argv)
 	rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
 	char errstr[512];
 
-	while ((opt = getopt(argc, argv, "t:p:b:f:l:n:s:")) != -1)
+	while ((opt = getopt(argc, argv, "t:p:b:f:l:n:s:m:")) != -1)
 	{
 		switch (opt)
 		{
@@ -137,6 +143,9 @@ int main (int argc, char **argv)
 				break;
 			case 's':
 				sleep_time_string = optarg;
+				break;
+			case 'm':
+				msgs_to_send_string = optarg;
 				break;
 			default:
 				print_usage_err();
@@ -163,6 +172,14 @@ int main (int argc, char **argv)
 		sleep_time = atoi(sleep_time_string);
 		if(sleep_time < 0)
 			errexit("Invalid sleep time number");
+	}
+
+	if(msgs_to_send_string != NULL)
+	{
+		msgs_to_send = (unsigned long)atol(msgs_to_send_string);
+		is_msgs_limited = true;
+		if(msgs_to_send < 0)
+			errexit("Invalid msgs_to_send number");
 	}
 
 	if(filename_string == NULL)
@@ -284,9 +301,10 @@ int main (int argc, char **argv)
 	gettimeofday(&timer_start, NULL);
 	double throughput_tol = TOL;
 	long total_bytes_sent = 0;
-	long total_msgs_sent = 0;
+	unsigned long total_msgs_sent = 0;
+	bool send_more_msgs = true;
 
-	while (run)
+	while (run && send_more_msgs)
 	{
 		int line_offset = 0;
 		int lines_sent;
@@ -330,19 +348,17 @@ int main (int argc, char **argv)
 			if(sleep_time > 0)
 				usleep(sleep_time);
 
-			long usecs_spent = (timer_end.tv_sec*1e6 + timer_end.tv_usec) - (timer_start.tv_sec*1e6 + timer_start.tv_usec);
-			double secs_spent = usecs_spent/(double)LOG_EVERY_USEC;
+			double delta_us = (timer_end.tv_sec * ONE_MILLION + timer_end.tv_usec) - (timer_start.tv_sec * ONE_MILLION + timer_start.tv_usec);
+			double delta_s = delta_us/(double)ONE_MILLION;
 
-			if(fabs(secs_spent - 1) < throughput_tol)
+			if(fabs(delta_s - 1) < throughput_tol)
 			{
-				int kbps_rate = (8*total_bytes_sent)/(1000*secs_spent);
+				double mbps = (8*total_bytes_sent)/(delta_us);
 				// this is because of the granularity
-				if (kbps_rate == 0)
-					printf("No bytes sent in %.6f secs\n", secs_spent);
-				else if (kbps_rate <= 1)
-					printf("Sent %ld bytes in %.6f secs (<= 1 Kbps), %ld msgs\n", total_bytes_sent, secs_spent, total_msgs_sent);
+				if (mbps == 0)
+					printf("No bytes sent in %.6f secs\n", delta_s);
 				else
-					printf("Sent %ld bytes in %.6f secs (%d Kbps), %ld msgs\n", total_bytes_sent, secs_spent, kbps_rate, total_msgs_sent);
+					printf("Sent %ld B in %.2f s (%.4f Mbps). total msgs: %ld\n", total_bytes_sent, delta_s, mbps, total_msgs_sent);
 				total_bytes_sent = 0;
 				gettimeofday(&timer_start, NULL);
 			}
@@ -351,9 +367,14 @@ int main (int argc, char **argv)
 			rd_kafka_poll(rk, 0);
 
 			line_offset = offset_table[lines_sent + lines_to_send -1];
+
+			if(is_msgs_limited && total_msgs_sent == msgs_to_send)
+			{
+				send_more_msgs = false;
+				break;
+			}
 		}
 	}
-
-	cleanup(rk, rkt);
+	cleanup(rk, rkt, total_msgs_sent);
 	return 0;
 }
